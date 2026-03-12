@@ -3,6 +3,9 @@ pub mod core;
 pub mod error;
 pub mod io;
 
+#[cfg(feature = "python")]
+mod python_api;
+
 pub use batch::{run_batch, run_batch_with_fallback_warning, BatchConfig, BatchInput};
 pub use core::types::{BatchResult, ChainType, NumberingResult, NtPosition};
 pub use error::IgnitionError;
@@ -84,6 +87,15 @@ pub fn number_chain_auto(
 
     let nt_trimmed = &nt_seq[frame.nt_start..];
     number_sequence(sequence_id, nt_trimmed, &frame.aa_seq, best_chain)
+}
+
+// ── PyO3 module entry point ────────────────────────────────────────────────────
+// The function name must match `module-name` in pyproject.toml
+// (ignition._ignition → fn _ignition).
+#[cfg(feature = "python")]
+#[pyo3::pymodule]
+fn _ignition(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
+    python_api::register(m)
 }
 
 #[cfg(test)]
