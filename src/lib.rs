@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod cli_runner;
 pub mod core;
 pub mod error;
 pub mod io;

@@ -27,6 +27,7 @@ clap     = { version = "4", features = ["derive"] }
 thiserror = "2"
 serde    = { version = "1", features = ["derive"] }
 csv      = "1"
+indicatif = "0.17"
 polars   = { version = "0.46", features = ["lazy", "parquet", "dtype-full"], default-features = false, optional = true }
 
 [dev-dependencies]

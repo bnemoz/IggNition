@@ -154,9 +154,35 @@ pub fn _run_fasta(
     result_to_py(py, batch_result)
 }
 
+/// Run the `ignition` CLI using Python's `sys.argv`.
+///
+/// Returns the process exit code (0 = success, 1 = error).
+/// Does **not** call `std::process::exit` — the caller is responsible.
+#[pyfunction]
+pub fn _cli_main(py: Python) -> PyResult<i32> {
+    // Read sys.argv (not std::env::args) so Python console-script wrappers work.
+    let sys = py.import("sys")?;
+    let argv: Vec<String> = sys.getattr("argv")?.extract()?;
+
+    let code = py.allow_threads(|| {
+        match crate::cli_runner::run_cli(argv) {
+            Ok(()) => 0,
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("clap") && !msg.contains("Usage:") {
+                    eprintln!("ignition: error: {e}");
+                }
+                1
+            }
+        }
+    });
+    Ok(code)
+}
+
 /// Register all Python-visible functions into the module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_run_batch, m)?)?;
     m.add_function(wrap_pyfunction!(_run_fasta, m)?)?;
+    m.add_function(wrap_pyfunction!(_cli_main, m)?)?;
     Ok(())
 }

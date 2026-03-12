@@ -110,6 +110,89 @@ pub fn read_tsv_reader<R: Read>(
     Ok(inputs)
 }
 
+/// Read a TSV/CSV file in paired mode — one row contains both a heavy-chain and
+/// a light-chain sequence in separate columns.
+///
+/// Produces two `BatchInput` entries per row (heavy with `chain=H`, light with
+/// `chain=None` for auto K/L detection). Rows with an empty NT field are skipped.
+pub fn read_tsv_paired_file(
+    path: &Path,
+    nt_col_heavy: &str,
+    aa_col_heavy: &str,
+    nt_col_light: &str,
+    aa_col_light: &str,
+    delimiter: u8,
+) -> Result<Vec<BatchInput>, IgnitionError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| IgnitionError::Io(format!("{}: {}", path.display(), e)))?;
+    read_tsv_paired_reader(
+        file, nt_col_heavy, aa_col_heavy, nt_col_light, aa_col_light, delimiter,
+    )
+}
+
+pub fn read_tsv_paired_reader<R: Read>(
+    reader: R,
+    nt_col_heavy: &str,
+    aa_col_heavy: &str,
+    nt_col_light: &str,
+    aa_col_light: &str,
+    delimiter: u8,
+) -> Result<Vec<BatchInput>, IgnitionError> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .flexible(true)
+        .from_reader(reader);
+
+    let headers = rdr
+        .headers()
+        .map_err(|e| IgnitionError::Io(e.to_string()))?
+        .clone();
+
+    let nt_h_idx = headers
+        .iter()
+        .position(|h| h == nt_col_heavy)
+        .ok_or_else(|| IgnitionError::Io(format!("Column '{}' not found", nt_col_heavy)))?;
+    let aa_h_idx = headers.iter().position(|h| h == aa_col_heavy);
+    let nt_l_idx = headers.iter().position(|h| h == nt_col_light);
+    let aa_l_idx = headers.iter().position(|h| h == aa_col_light);
+
+    let mut inputs = Vec::new();
+    for (row_idx, result) in rdr.records().enumerate() {
+        let record = result.map_err(|e| IgnitionError::Io(e.to_string()))?;
+
+        // Heavy entry
+        let heavy_nt = record.get(nt_h_idx).unwrap_or("").trim().as_bytes().to_vec();
+        if !heavy_nt.is_empty() {
+            let heavy_aa = aa_h_idx
+                .and_then(|i| record.get(i))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.as_bytes().to_vec());
+            inputs.push(BatchInput::new(
+                row_idx as u32,
+                heavy_nt,
+                heavy_aa,
+                Some(crate::core::types::ChainType::Heavy),
+            ));
+        }
+
+        // Light entry (chain auto-detected → Kappa or Lambda)
+        if let Some(nt_l) = nt_l_idx {
+            let light_nt = record.get(nt_l).unwrap_or("").trim().as_bytes().to_vec();
+            if !light_nt.is_empty() {
+                let light_aa = aa_l_idx
+                    .and_then(|i| record.get(i))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.as_bytes().to_vec());
+                inputs.push(BatchInput::new(row_idx as u32, light_nt, light_aa, None));
+            }
+        }
+    }
+
+    Ok(inputs)
+}
+
 /// Write numbering results to a TSV/CSV file.
 ///
 /// The output format follows the same schema as stdout: per-nucleotide by

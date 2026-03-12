@@ -28,4 +28,4 @@ python-source = "python"
 bindings = "pyo3"
 
 [project.scripts]
-ignition = "ignition._ignition:_cli_main"
+ignition = "ignition._cli:main"
