@@ -1,6 +1,6 @@
-use std::path::Path;
-
 // These imports are only used by the stub functions below (non-io_parquet build).
+#[cfg(not(feature = "io_parquet"))]
+use std::path::Path;
 #[cfg(not(feature = "io_parquet"))]
 use crate::batch::BatchInput;
 #[cfg(not(feature = "io_parquet"))]
@@ -82,13 +82,13 @@ mod inner {
             .aa_col
             .as_ref()
             .and_then(|col| df.column(col).ok())
-            .and_then(|c| c.str().ok().map(|s| s.clone()));
+            .and_then(|c| c.str().ok().cloned());
 
         let locus_strs_opt: Option<StringChunked> = config
             .locus_col
             .as_ref()
             .and_then(|col| df.column(col).ok())
-            .and_then(|c| c.str().ok().map(|s| s.clone()));
+            .and_then(|c| c.str().ok().cloned());
 
         let n = df.height();
         let mut inputs = Vec::with_capacity(n);

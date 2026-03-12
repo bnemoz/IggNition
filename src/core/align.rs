@@ -3,7 +3,6 @@
 /// Uses BLOSUM62 for amino acid scoring with affine gap penalties.
 /// Returns the alignment as two byte-slices of equal length, with
 /// b'-' for gaps. Also returns the raw score.
-
 pub struct Alignment {
     pub score: i32,
     /// query sequence with gaps inserted (same length as `target_aligned`)

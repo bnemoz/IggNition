@@ -58,11 +58,11 @@ fn parse_fasta<R: Read>(reader: R) -> Result<Vec<FastaRecord>, IgnitionError> {
     for line in buf.lines() {
         let line = line.map_err(|e| IgnitionError::Io(e.to_string()))?;
         let line = line.trim_end();
-        if line.starts_with('>') {
+        if let Some(rest) = line.strip_prefix('>') {
             if let Some(header) = current_header.take() {
                 records.push(FastaRecord { header, sequence: std::mem::take(&mut current_seq) });
             }
-            current_header = Some(line[1..].to_string());
+            current_header = Some(rest.to_string());
         } else if !line.is_empty() {
             current_seq.extend_from_slice(line.as_bytes());
         }
@@ -74,17 +74,11 @@ fn parse_fasta<R: Read>(reader: R) -> Result<Vec<FastaRecord>, IgnitionError> {
 }
 
 /// Configuration for reading FASTA files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FastaReaderConfig {
     /// If true, paired NT+AA records are expected (alternating or by naming convention).
     /// If false, each record is treated as NT-only (AA auto-detected or absent).
     pub paired_nt_aa: bool,
-}
-
-impl Default for FastaReaderConfig {
-    fn default() -> Self {
-        Self { paired_nt_aa: false }
-    }
 }
 
 /// Read a FASTA file and produce a Vec of `BatchInput`.

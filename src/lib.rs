@@ -19,8 +19,8 @@ use core::frame::{resolve_with_aa, resolve_without_aa};
 /// # Arguments
 /// * `sequence_id` - External identifier for this sequence
 /// * `nt_seq`      - Nucleotide sequence (ASCII, A/T/G/C)
-/// * `aa_seq`      - Amino acid sequence. If `None`, the reading frame is
-///                   auto-detected (fallback mode — emits a warning).
+/// * `aa_seq` - Amino acid sequence. If `None`, the reading frame is
+///   auto-detected (fallback mode — emits a warning).
 /// * `chain`       - Chain type (Heavy, Kappa, Lambda)
 ///
 /// # Returns

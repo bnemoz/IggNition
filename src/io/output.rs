@@ -118,8 +118,8 @@ pub fn write_wide_row<W: Write>(
     for &chain in chain_order {
         if chain == result.chain {
             let max = chain.max_nt_positions() as usize;
-            for i in 1..=max {
-                write!(w, "\t{}", nt_map[i] as char)
+            for &nt in &nt_map[1..=max] {
+                write!(w, "\t{}", nt as char)
                     .map_err(|e| IgnitionError::Io(e.to_string()))?;
             }
         } else {
