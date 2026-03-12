@@ -104,26 +104,91 @@ def _to_per_codon(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _to_wide(df: pl.DataFrame) -> pl.DataFrame:
-    """Pivot to one row per sequence with positional columns."""
-    # Add a combined column name: chain_nt_position
+def _to_wide(df: pl.DataFrame, per_chain: bool = False) -> pl.DataFrame:
+    """Pivot to wide format with positional columns.
+
+    Column naming: Heavy → ``H1``, ``H2``, …; Kappa or Lambda → ``L1``, ``L2``, …
+
+    Args:
+        per_chain: If ``True``, keep one row per chain (index by ``sequence_id``
+            and ``chain``).  If ``False`` (default), merge H and L for the same
+            ``sequence_id`` into a single row.
+    """
+    # Normalise chain label: K → L so both light-chain subtypes share the same
+    # column prefix and (when per_chain=True) the same pivot-index value.
     df = df.with_columns(
-        (pl.col("chain") + "_nt_" + pl.col("nt_position").cast(pl.Utf8)).alias("_col")
+        pl.when(pl.col("chain") == "K")
+        .then(pl.lit("L"))
+        .otherwise(pl.col("chain"))
+        .alias("chain")
     )
-    return df.pivot(
-        index="sequence_id",
+    # Build positional column name: H1, L1, …
+    df = df.with_columns(
+        (pl.col("chain") + pl.col("nt_position").cast(pl.Utf8)).alias("_col")
+    )
+    index = ["sequence_id", "chain"] if per_chain else ["sequence_id"]
+    result = df.pivot(
+        index=index,
         on="_col",
         values="nucleotide",
         aggregate_function="first",
     )
+    # Drop helper column if Polars carried it through
+    if "_col" in result.columns:
+        result = result.drop("_col")
+    return result
 
 
-def _apply_format(df: pl.DataFrame, per_codon: bool, wide: bool) -> pl.DataFrame:
+def _apply_format(
+    df: pl.DataFrame,
+    per_codon: bool,
+    wide: bool,
+    per_chain: bool = False,
+) -> pl.DataFrame:
     if per_codon:
         df = _to_per_codon(df)
     if wide:
-        df = _to_wide(df)
+        df = _to_wide(df, per_chain=per_chain)
     return df
+
+
+# ─── Name propagation ─────────────────────────────────────────────────────────
+
+def _attach_name(
+    results_df: pl.DataFrame,
+    source_df: pl.DataFrame,
+    name_col: str,
+) -> pl.DataFrame:
+    """Left-join ``name_col`` from ``source_df`` onto ``results_df`` by ``sequence_id``."""
+    name_map = pl.DataFrame(
+        {
+            "sequence_id": pl.Series(
+                range(len(source_df)), dtype=pl.UInt32
+            ),
+            "name": source_df[name_col].cast(pl.Utf8),
+        }
+    )
+    return results_df.join(name_map, on="sequence_id", how="left")
+
+
+# ─── Progress bar ─────────────────────────────────────────────────────────────
+
+def _make_progress_bar(total: int, verbose: bool):
+    """Return ``(pbar, callback)`` when verbose and tqdm is available, else ``(None, None)``."""
+    if not verbose or total == 0:
+        return None, None
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return None, None
+    pbar = tqdm(total=total, desc="numbering", unit=" seq")
+
+    def _callback(done: int) -> None:
+        delta = done - pbar.n
+        if delta > 0:
+            pbar.update(delta)
+
+    return pbar, _callback
 
 
 # ─── DataFrame dispatch helpers ────────────────────────────────────────────────
@@ -153,6 +218,7 @@ def _run_generic(
     locus_col: Optional[str],
     chain_override: Optional[str],
     num_threads: Optional[int],
+    progress_callback=None,
 ) -> tuple[dict, dict]:
     n = len(df)
     seq_ids = list(range(n))
@@ -162,7 +228,7 @@ def _run_generic(
         chains: list = [chain_override] * n
     else:
         chains = _col_list(df, locus_col)
-    return _rust_run_batch(seq_ids, nts, aas, chains, num_threads)
+    return _rust_run_batch(seq_ids, nts, aas, chains, num_threads, progress_callback)
 
 
 def _run_paired(
@@ -172,6 +238,7 @@ def _run_paired(
     nt_col_light: str,
     aa_col_light: str,
     num_threads: Optional[int],
+    progress_callback=None,
 ) -> tuple[dict, dict]:
     n = len(df)
     heavy_nts = _col_list(df, nt_col_heavy)
@@ -197,7 +264,7 @@ def _run_paired(
             {"sequence_id": [], "chain": [], "error": []},
         )
 
-    return _rust_run_batch(seq_ids, nts, aas, chains, num_threads)
+    return _rust_run_batch(seq_ids, nts, aas, chains, num_threads, progress_callback)
 
 
 # ─── Output writer ─────────────────────────────────────────────────────────────
@@ -231,8 +298,11 @@ def run(
     aa_col_light: str = "sequence_aa:1",
     per_codon: bool = False,
     wide: bool = False,
+    per_chain: bool = False,
+    name_col: Optional[str] = None,
     output: Optional[Union[str, Path]] = None,
     num_threads: Optional[int] = None,
+    verbose: bool = False,
 ) -> Union[pl.DataFrame, tuple[pl.DataFrame, pl.DataFrame]]:
     """Number antibody variable domain sequences using the Aho scheme.
 
@@ -266,10 +336,18 @@ def run(
         aa_col_light: AA column for the light chain (paired mode).
         per_codon: Return per-codon format (one row per Aho position) instead of
             per-nucleotide.
-        wide: Pivot to wide format — one row per sequence, positional columns.
+        wide: Pivot to wide format — positional columns ``H1``…``H447``,
+            ``L1``…``L444`` (Kappa and Lambda both use the ``L`` prefix).
+        per_chain: When ``wide=True``, keep one row per chain instead of merging
+            H and L for the same ``sequence_id`` into one row.
+        name_col: Column in the input DataFrame to propagate as a ``"name"`` column
+            in the results.  Both H and L results for a paired row receive the
+            same name.
         output: Write results to this file path.  Format inferred from extension.
             When set, the function *still* returns the DataFrames.
         num_threads: Number of Rayon worker threads.  ``None`` → all cores.
+        verbose: Reserved for future progress reporting.  Currently a no-op in
+            the Python API.
 
     Returns:
         * Single-sequence mode: ``pl.DataFrame``
@@ -286,7 +364,7 @@ def run(
             )
         res_dict, _ = _rust_run_batch([0], [nt_seq], [aa_seq], [chain], num_threads)
         results_df = _build_results_df(res_dict)
-        results_df = _apply_format(results_df, per_codon, wide)
+        results_df = _apply_format(results_df, per_codon, wide, per_chain)
         if output:
             _write_output(results_df, Path(output))
         return results_df
@@ -309,8 +387,9 @@ def run(
                 chain=chain, paired=paired,
                 nt_col_heavy=nt_col_heavy, aa_col_heavy=aa_col_heavy,
                 nt_col_light=nt_col_light, aa_col_light=aa_col_light,
-                per_codon=per_codon, wide=wide,
-                output=output, num_threads=num_threads,
+                per_codon=per_codon, wide=wide, per_chain=per_chain,
+                name_col=name_col, output=output, num_threads=num_threads,
+                verbose=verbose,
             )
 
         elif suffix in (".tsv", ".txt"):
@@ -321,8 +400,9 @@ def run(
                 chain=chain, paired=paired,
                 nt_col_heavy=nt_col_heavy, aa_col_heavy=aa_col_heavy,
                 nt_col_light=nt_col_light, aa_col_light=aa_col_light,
-                per_codon=per_codon, wide=wide,
-                output=output, num_threads=num_threads,
+                per_codon=per_codon, wide=wide, per_chain=per_chain,
+                name_col=name_col, output=output, num_threads=num_threads,
+                verbose=verbose,
             )
 
         elif suffix == ".csv":
@@ -333,8 +413,9 @@ def run(
                 chain=chain, paired=paired,
                 nt_col_heavy=nt_col_heavy, aa_col_heavy=aa_col_heavy,
                 nt_col_light=nt_col_light, aa_col_light=aa_col_light,
-                per_codon=per_codon, wide=wide,
-                output=output, num_threads=num_threads,
+                per_codon=per_codon, wide=wide, per_chain=per_chain,
+                name_col=name_col, output=output, num_threads=num_threads,
+                verbose=verbose,
             )
 
         else:
@@ -343,7 +424,7 @@ def run(
                 "Supported: .fasta/.fa/.fna, .tsv/.txt, .csv, .parquet/.pq"
             )
 
-        results_df = _apply_format(results_df, per_codon, wide)
+        results_df = _apply_format(results_df, per_codon, wide, per_chain)
         if output:
             _write_output(results_df, Path(output))
         return results_df, errors_df
@@ -356,19 +437,29 @@ def run(
             nt_col_heavy in df.columns and nt_col_light in df.columns
         )
 
-        if use_paired:
-            res_dict, err_dict = _run_paired(
-                df, nt_col_heavy, aa_col_heavy, nt_col_light, aa_col_light,
-                num_threads,
-            )
-        else:
-            res_dict, err_dict = _run_generic(
-                df, nt_col, aa_col, locus_col, chain, num_threads
-            )
+        n_total = 2 * len(df) if use_paired else len(df)
+        _pbar, _progress_cb = _make_progress_bar(n_total, verbose)
+        try:
+            if use_paired:
+                res_dict, err_dict = _run_paired(
+                    df, nt_col_heavy, aa_col_heavy, nt_col_light, aa_col_light,
+                    num_threads, _progress_cb,
+                )
+            else:
+                res_dict, err_dict = _run_generic(
+                    df, nt_col, aa_col, locus_col, chain, num_threads, _progress_cb
+                )
+        finally:
+            if _pbar is not None:
+                _pbar.close()
 
         results_df = _build_results_df(res_dict)
         errors_df = _build_errors_df(err_dict)
-        results_df = _apply_format(results_df, per_codon, wide)
+
+        if name_col and name_col in df.columns:
+            results_df = _attach_name(results_df, df, name_col)
+
+        results_df = _apply_format(results_df, per_codon, wide, per_chain)
 
         if output:
             _write_output(results_df, Path(output))

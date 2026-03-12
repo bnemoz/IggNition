@@ -91,6 +91,10 @@ struct RunArgs {
     /// Number of Rayon worker threads (default: all cores)
     #[arg(long)]
     threads: Option<usize>,
+
+    /// Show progress bar and informational messages
+    #[arg(long, short = 'v')]
+    verbose: bool,
 }
 
 // ─── Public entry point ────────────────────────────────────────────────────────
@@ -135,14 +139,16 @@ fn run_command(args: RunArgs) -> Result<(), IgnitionError> {
     let inputs = read_inputs(&args, fmt)?;
     let total = inputs.len();
 
-    eprintln!(
-        "iggnition: {} sequences loaded from {}",
-        total,
-        args.input.display()
-    );
+    if args.verbose {
+        eprintln!(
+            "iggnition: {} sequences loaded from {}",
+            total,
+            args.input.display()
+        );
+    }
 
-    // ── Progress bar (only when writing to file, not stdout) ──────────────────
-    let pb = build_progress_bar(total, args.output.is_some());
+    // ── Progress bar (only when writing to file and verbose) ─────────────────
+    let pb = build_progress_bar(total, args.output.is_some() && args.verbose);
 
     let progress_fn = {
         let pb = pb.clone();
@@ -181,11 +187,13 @@ fn run_command(args: RunArgs) -> Result<(), IgnitionError> {
         );
     }
 
-    eprintln!(
-        "iggnition: {} OK, {} errors",
-        result.results.len(),
-        result.errors.len()
-    );
+    if args.verbose {
+        eprintln!(
+            "iggnition: {} OK, {} errors",
+            result.results.len(),
+            result.errors.len()
+        );
+    }
 
     // ── Output format ──────────────────────────────────────────────────────────
     let out_fmt = match (args.per_codon, args.wide) {

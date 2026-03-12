@@ -77,6 +77,8 @@ fn result_to_py(py: Python, result: BatchResult) -> PyResult<(PyObject, PyObject
 ///   aa_seqs: Amino acid sequences (str or None → fallback auto-translate mode).
 ///   chains: Chain codes ("H"/"IGH", "K"/"IGK", "L"/"IGL", or None → auto-detect).
 ///   num_threads: Rayon worker threads (None → all cores).
+///   progress_callback: Optional callable invoked as `cb(done: int)` every
+///     ~1 000 sequences.  Called from Rayon threads (GIL re-acquired internally).
 ///
 /// Returns:
 ///   (results_dict, errors_dict): dicts of parallel lists.
@@ -84,7 +86,7 @@ fn result_to_py(py: Python, result: BatchResult) -> PyResult<(PyObject, PyObject
 ///                        codon_position, nucleotide (bytes), amino_acid (bytes)
 ///     errors_dict  keys: sequence_id, chain, error
 #[pyfunction]
-#[pyo3(signature = (sequence_ids, nt_seqs, aa_seqs, chains, num_threads=None))]
+#[pyo3(signature = (sequence_ids, nt_seqs, aa_seqs, chains, num_threads=None, progress_callback=None))]
 pub fn _run_batch(
     py: Python,
     sequence_ids: Vec<u32>,
@@ -92,6 +94,7 @@ pub fn _run_batch(
     aa_seqs: Vec<Option<String>>,
     chains: Vec<Option<String>>,
     num_threads: Option<usize>,
+    progress_callback: Option<PyObject>,
 ) -> PyResult<(PyObject, PyObject)> {
     let n = sequence_ids.len();
     if nt_seqs.len() != n || aa_seqs.len() != n || chains.len() != n {
@@ -120,8 +123,19 @@ pub fn _run_batch(
         ..Default::default()
     };
 
-    let batch_result =
-        py.allow_threads(|| run_batch_with_fallback_warning::<fn(usize)>(&inputs, &config, None));
+    let batch_result = match progress_callback {
+        Some(cb) => py.allow_threads(move || {
+            let progress_fn = move |done: usize| {
+                Python::with_gil(|py| {
+                    let _ = cb.call1(py, (done,));
+                });
+            };
+            run_batch_with_fallback_warning(&inputs, &config, Some(&progress_fn))
+        }),
+        None => py.allow_threads(move || {
+            run_batch_with_fallback_warning::<fn(usize)>(&inputs, &config, None)
+        }),
+    };
 
     result_to_py(py, batch_result)
 }

@@ -82,13 +82,18 @@ pub fn write_per_codon_rows<W: Write>(
 
 /// Generate the wide-format header for a given chain type.
 ///
-/// Columns: sequence_id, then `{chain}_nt_{nt_pos}` for every Aho × 3 positions.
+/// Columns: ``sequence_id``, then ``H{n}`` for heavy-chain positions and ``L{n}``
+/// for both Kappa and Lambda positions (Kappa and Lambda share the ``L`` prefix).
 pub fn wide_header(chains: &[ChainType]) -> String {
     let mut cols = vec!["sequence_id".to_string()];
     for &chain in chains {
+        let prefix = match chain {
+            ChainType::Heavy => "H",
+            ChainType::Kappa | ChainType::Lambda => "L",
+        };
         let max_nt = chain.max_nt_positions();
         for nt_pos in 1..=max_nt {
-            cols.push(format!("{}_nt_{}", chain, nt_pos));
+            cols.push(format!("{}{}", prefix, nt_pos));
         }
     }
     cols.join("\t") + "\n"
@@ -255,7 +260,7 @@ mod tests {
         // sequence_id + 447 nt positions
         assert_eq!(cols.len(), 1 + ChainType::Heavy.max_nt_positions() as usize);
         assert_eq!(cols[0], "sequence_id");
-        assert_eq!(cols[1], "H_nt_1");
+        assert_eq!(cols[1], "H1");
     }
 
     #[test]
