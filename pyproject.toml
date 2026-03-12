@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ignition"
+version = "0.1.0"
+description = "Ultra-fast antibody variable domain Aho numbering"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Benjamin Nemoz" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "polars>=0.20",
+]
+
+[project.optional-dependencies]
+dev = ["maturin", "pytest", "pandas", "pyarrow"]
+
+[tool.maturin]
+features = ["pyo3/extension-module", "python"]
+module-name = "ignition._ignition"
+python-source = "python"
+bindings = "pyo3"
+
+[project.scripts]
+ignition = "ignition._ignition:_cli_main"
