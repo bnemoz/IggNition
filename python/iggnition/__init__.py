@@ -149,14 +149,23 @@ _WIDE_H_NAMES = [f"H{i + 1}" for i in range(_WIDE_H_COLS)]
 _WIDE_L_NAMES = [f"L{i + 1}" for i in range(_WIDE_L_COLS)]
 
 
-def _build_wide_df(res: dict, per_chain: bool = False) -> pl.DataFrame:
+def _build_wide_df(
+    res: dict,
+    per_chain: bool = False,
+    human_readable: bool = True,
+) -> pl.DataFrame:
     """Build a wide DataFrame from the compact Rust wide-format dict.
 
-    Nucleotide columns (``H1``…``H447``, ``L1``…``L444``) are stored as
-    ``pl.UInt8`` (ASCII byte values: 65=A, 84=T, 71=G, 67=C, 45=gap).
-    Convert with ``pl.col("H1").map_elements(chr)`` if you need strings.
+    By default nucleotide columns (``H1``…``H447``, ``L1``…``L444``) are stored
+    as ``pl.UInt8`` (ASCII byte values: 65=A, 84=T, 71=G, 67=C, 45=gap), which
+    is the most memory-efficient representation for downstream numerical work.
 
-    Memory: ~2.5 GB for 2.4 M paired antibodies vs ~400+ GB via the pivot path.
+    When ``human_readable=True`` the same numpy byte arrays are decoded to
+    single-character ``pl.Utf8`` strings (A/T/G/C/–) using a fully vectorised
+    ``astype('U1')`` conversion — no Python loop per element.
+
+    Memory (UInt8 path): ~2.5 GB for 2.4 M paired antibodies vs ~400+ GB via
+    the per-nucleotide pivot path.
     """
     import numpy as np
 
@@ -168,35 +177,22 @@ def _build_wide_df(res: dict, per_chain: bool = False) -> pl.DataFrame:
     n_h = len(h_ids)
     n_l = len(l_ids)
 
-    # np.frombuffer is zero-copy; reshape creates a view (no extra allocation).
-    # pl.from_numpy copies once into Arrow column-major storage.
-    if n_h > 0:
-        h_arr = np.frombuffer(h_bytes, dtype=np.uint8).reshape(n_h, _WIDE_H_COLS)
-        df_h = pl.concat(
-            [
-                pl.DataFrame({"sequence_id": pl.Series(h_ids, dtype=pl.UInt32)}),
-                pl.from_numpy(h_arr, schema=_WIDE_H_NAMES),
-            ],
-            how="horizontal",
-        )
-    else:
-        df_h = pl.DataFrame(
-            schema={"sequence_id": pl.UInt32, **{c: pl.UInt8 for c in _WIDE_H_NAMES}}
-        )
+    def _arr_to_df(ids, raw_bytes, n_rows, n_cols, col_names, uint8_schema):
+        if n_rows == 0:
+            return pl.DataFrame(
+                schema={"sequence_id": pl.UInt32, **uint8_schema}
+            )
+        arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(n_rows, n_cols)
+        if human_readable:
+            # view as single-byte strings then promote to Unicode — fully vectorised
+            arr = arr.view("S1").reshape(n_rows, n_cols).astype("U1")
+        id_df = pl.DataFrame({"sequence_id": pl.Series(ids, dtype=pl.UInt32)})
+        return pl.concat([id_df, pl.from_numpy(arr, schema=col_names)], how="horizontal")
 
-    if n_l > 0:
-        l_arr = np.frombuffer(l_bytes, dtype=np.uint8).reshape(n_l, _WIDE_L_COLS)
-        df_l = pl.concat(
-            [
-                pl.DataFrame({"sequence_id": pl.Series(l_ids, dtype=pl.UInt32)}),
-                pl.from_numpy(l_arr, schema=_WIDE_L_NAMES),
-            ],
-            how="horizontal",
-        )
-    else:
-        df_l = pl.DataFrame(
-            schema={"sequence_id": pl.UInt32, **{c: pl.UInt8 for c in _WIDE_L_NAMES}}
-        )
+    h_schema = {c: pl.UInt8 for c in _WIDE_H_NAMES}
+    l_schema = {c: pl.UInt8 for c in _WIDE_L_NAMES}
+    df_h = _arr_to_df(h_ids, h_bytes, n_h, _WIDE_H_COLS, _WIDE_H_NAMES, h_schema)
+    df_l = _arr_to_df(l_ids, l_bytes, n_l, _WIDE_L_COLS, _WIDE_L_NAMES, l_schema)
 
     if per_chain:
         df_h = df_h.with_columns(pl.lit("H").alias("chain"))
@@ -417,6 +413,7 @@ def run(
     per_codon: bool = False,
     wide: bool = False,
     per_chain: bool = False,
+    human_readable: bool = True,
     name_col: Optional[str] = None,
     output: Optional[Union[str, Path]] = None,
     num_threads: Optional[int] = None,
@@ -462,6 +459,13 @@ def run(
             more memory-efficient than the per-nucleotide pivot.
         per_chain: When ``wide=True``, keep one row per chain instead of merging
             H and L for the same ``sequence_id`` into one row.
+        human_readable: When ``wide=True``, decode positional columns from
+            ``pl.UInt8`` ASCII bytes to single-character ``pl.Utf8`` strings
+            (A/T/G/C/–).  Uses a fully vectorised numpy ``astype('U1')``
+            conversion — no per-element Python loop.  Defaults to ``True``
+            for readability.  Set to ``False`` when processing very large
+            datasets (millions of sequences) where the ``UInt8`` representation
+            saves significant memory and enables faster numerical operations.
         name_col: Column in the input DataFrame to use as the row identifier.
             In wide format, becomes the first column ``seq_name`` (replacing the
             integer ``sequence_id``).  Both H and L results for a paired row
@@ -596,7 +600,7 @@ def run(
         errors_df = _build_errors_df(err_dict)
 
         if use_wide_fast:
-            results_df = _build_wide_df(raw_wide, per_chain)
+            results_df = _build_wide_df(raw_wide, per_chain, human_readable)
             if name_col and name_col in df.columns:
                 results_df = _attach_name(results_df, df, name_col)
                 # Promote name to front as seq_name; drop integer sequence_id
