@@ -178,11 +178,18 @@ _WIDE_L_COLS = 444  # Kappa/Lambda: 148 Aho positions × 3
 _WIDE_H_NAMES = [f"H{i + 1}" for i in range(_WIDE_H_COLS)]
 _WIDE_L_NAMES = [f"L{i + 1}" for i in range(_WIDE_L_COLS)]
 
+# AA-level wide columns: one column per Aho position
+_WIDE_AA_H_COLS = 149
+_WIDE_AA_L_COLS = 148
+_WIDE_AA_H_NAMES = [f"H_{i + 1}" for i in range(_WIDE_AA_H_COLS)]
+_WIDE_AA_L_NAMES = [f"L_{i + 1}" for i in range(_WIDE_AA_L_COLS)]
+
 
 def _build_wide_df(
     res: dict,
     per_chain: bool = False,
     human_readable: bool = True,
+    level: str = "NT",
 ) -> pl.DataFrame:
     """Build a wide DataFrame from the compact Rust wide-format dict.
 
@@ -190,8 +197,11 @@ def _build_wide_df(
     as ``pl.UInt8`` (ASCII byte values: 65=A, 84=T, 71=G, 67=C, 45=gap), which
     is the most memory-efficient representation for downstream numerical work.
 
+    When ``level="AA"``, amino acid columns (``H_1``…``H_149``, ``L_1``…``L_148``)
+    are returned instead — one column per Aho position.
+
     When ``human_readable=True`` the same numpy byte arrays are decoded to
-    single-character ``pl.Utf8`` strings (A/T/G/C/–) using a fully vectorised
+    single-character ``pl.Utf8`` strings using a fully vectorised
     ``astype('U1')`` conversion — no Python loop per element.
 
     Memory (UInt8 path): ~2.5 GB for 2.4 M paired antibodies vs ~400+ GB via
@@ -199,10 +209,20 @@ def _build_wide_df(
     """
     import numpy as np
 
-    h_ids: list = res["H_sequence_id"]
-    h_bytes: bytes = res["H_nucleotides"]
-    l_ids: list = res["L_sequence_id"]
-    l_bytes: bytes = res["L_nucleotides"]
+    if level == "AA":
+        h_ids: list = res["H_sequence_id"]
+        h_bytes: bytes = res["H_amino_acids"]
+        l_ids: list = res["L_sequence_id"]
+        l_bytes: bytes = res["L_amino_acids"]
+        h_cols, l_cols = _WIDE_AA_H_COLS, _WIDE_AA_L_COLS
+        h_names, l_names = _WIDE_AA_H_NAMES, _WIDE_AA_L_NAMES
+    else:
+        h_ids = res["H_sequence_id"]
+        h_bytes = res["H_nucleotides"]
+        l_ids = res["L_sequence_id"]
+        l_bytes = res["L_nucleotides"]
+        h_cols, l_cols = _WIDE_H_COLS, _WIDE_L_COLS
+        h_names, l_names = _WIDE_H_NAMES, _WIDE_L_NAMES
 
     n_h = len(h_ids)
     n_l = len(l_ids)
@@ -214,15 +234,14 @@ def _build_wide_df(
             )
         arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(n_rows, n_cols)
         if human_readable:
-            # view as single-byte strings then promote to Unicode — fully vectorised
             arr = arr.view("S1").reshape(n_rows, n_cols).astype("U1")
         id_df = pl.DataFrame({"sequence_id": pl.Series(ids, dtype=pl.UInt32)})
         return pl.concat([id_df, pl.from_numpy(arr, schema=col_names)], how="horizontal")
 
-    h_schema = {c: pl.UInt8 for c in _WIDE_H_NAMES}
-    l_schema = {c: pl.UInt8 for c in _WIDE_L_NAMES}
-    df_h = _arr_to_df(h_ids, h_bytes, n_h, _WIDE_H_COLS, _WIDE_H_NAMES, h_schema)
-    df_l = _arr_to_df(l_ids, l_bytes, n_l, _WIDE_L_COLS, _WIDE_L_NAMES, l_schema)
+    h_schema = {c: pl.UInt8 for c in h_names}
+    l_schema = {c: pl.UInt8 for c in l_names}
+    df_h = _arr_to_df(h_ids, h_bytes, n_h, h_cols, h_names, h_schema)
+    df_l = _arr_to_df(l_ids, l_bytes, n_l, l_cols, l_names, l_schema)
 
     if per_chain:
         df_h = df_h.with_columns(pl.lit("H").alias("chain"))
@@ -368,13 +387,14 @@ def _run_generic_wide(
     chain_override: Optional[str],
     num_threads: Optional[int],
     progress_callback=None,
+    level: str = "NT",
 ) -> tuple[dict, dict]:
     n = len(df)
     seq_ids = list(range(n))
     nts = _col_list(df, nt_col)
     aas = _col_list(df, aa_col)
     chains: list = [chain_override] * n if chain_override else _col_list(df, locus_col)
-    return _rust_run_batch_wide(seq_ids, nts, aas, chains, num_threads, progress_callback)
+    return _rust_run_batch_wide(seq_ids, nts, aas, chains, num_threads, progress_callback, level)
 
 
 def _run_paired_wide(
@@ -385,6 +405,7 @@ def _run_paired_wide(
     aa_col_light: str,
     num_threads: Optional[int],
     progress_callback=None,
+    level: str = "NT",
 ) -> tuple[dict, dict]:
     n = len(df)
     heavy_nts = _col_list(df, nt_col_heavy)
@@ -402,13 +423,15 @@ def _run_paired_wide(
             aas.append(light_aas[i]); chains.append(None)
 
     if not seq_ids:
+        data_key = "H_amino_acids" if level == "AA" else "H_nucleotides"
+        l_key = "L_amino_acids" if level == "AA" else "L_nucleotides"
         empty = {
-            "H_sequence_id": [], "H_nucleotides": b"",
-            "L_sequence_id": [], "L_nucleotides": b"",
+            "H_sequence_id": [], data_key: b"",
+            "L_sequence_id": [], l_key: b"",
         }
         return empty, {"sequence_id": [], "chain": [], "error": []}
 
-    return _rust_run_batch_wide(seq_ids, nts, aas, chains, num_threads, progress_callback)
+    return _rust_run_batch_wide(seq_ids, nts, aas, chains, num_threads, progress_callback, level)
 
 
 # ─── Output writer ─────────────────────────────────────────────────────────────
@@ -443,6 +466,7 @@ def run(
     per_codon: bool = False,
     wide: bool = False,
     per_chain: bool = False,
+    level: str = "NT",
     human_readable: bool = True,
     name_col: Optional[str] = None,
     output: Optional[Union[str, Path]] = None,
@@ -489,6 +513,10 @@ def run(
             more memory-efficient than the per-nucleotide pivot.
         per_chain: When ``wide=True``, keep one row per chain instead of merging
             H and L for the same ``sequence_id`` into one row.
+        level: ``"NT"`` (default) for per-nucleotide wide columns
+            (``H1``…``H447``, ``L1``…``L444``) or ``"AA"`` for per-amino-acid
+            wide columns (``H_1``…``H_149``, ``L_1``…``L_148``).  Only affects
+            wide format output.
         human_readable: When ``wide=True``, decode positional columns from
             ``pl.UInt8`` ASCII bytes to single-character ``pl.Utf8`` strings
             (A/T/G/C/–).  Uses a fully vectorised numpy ``astype('U1')``
@@ -511,6 +539,10 @@ def run(
         * Single-sequence mode: ``pl.DataFrame``
         * Batch mode: ``(results_df, errors_df)``
     """
+    level = level.upper()
+    if level not in ("NT", "AA"):
+        raise ValueError(f"level must be 'NT' or 'AA', got {level!r}")
+
     # ── Single sequence ───────────────────────────────────────────────────────
     if nt_seq is not None:
         if aa_seq is None:
@@ -607,11 +639,12 @@ def run(
                 if use_paired:
                     raw_wide, err_dict = _run_paired_wide(
                         df, nt_col_heavy, aa_col_heavy, nt_col_light, aa_col_light,
-                        num_threads, _progress_cb,
+                        num_threads, _progress_cb, level=level,
                     )
                 else:
                     raw_wide, err_dict = _run_generic_wide(
-                        df, nt_col, aa_col, locus_col, chain, num_threads, _progress_cb
+                        df, nt_col, aa_col, locus_col, chain, num_threads, _progress_cb,
+                        level=level,
                     )
             else:
                 if use_paired:
@@ -630,7 +663,7 @@ def run(
         errors_df = _build_errors_df(err_dict)
 
         if use_wide_fast:
-            results_df = _build_wide_df(raw_wide, per_chain, human_readable)
+            results_df = _build_wide_df(raw_wide, per_chain, human_readable, level=level)
             if name_col and name_col in df.columns:
                 results_df = _attach_name(results_df, df, name_col)
                 # Promote name to front as seq_name; drop integer sequence_id

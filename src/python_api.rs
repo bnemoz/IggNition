@@ -146,6 +146,84 @@ fn result_to_py_wide(py: Python, result: BatchResult) -> PyResult<(PyObject, PyO
     Ok((wide.into(), errs.into()))
 }
 
+/// Pack amino acids at Aho positions into flat byte arrays (one byte per Aho position).
+///
+/// `H_amino_acids` has length `n_heavy × 149` bytes; `L_amino_acids` has length
+/// `n_light × 148` bytes.  Each entry is an ASCII byte (single-letter AA or b'-').
+fn result_to_py_wide_aa(py: Python, result: BatchResult) -> PyResult<(PyObject, PyObject)> {
+    let h_size = ChainType::Heavy.max_aho_position() as usize; // 149
+    let l_size = ChainType::Kappa.max_aho_position() as usize; // 148
+
+    let n_h = result
+        .results
+        .iter()
+        .filter(|r| r.chain == ChainType::Heavy)
+        .count();
+    let n_l = result.results.len() - n_h;
+
+    let mut h_seq_ids: Vec<u32> = Vec::with_capacity(n_h);
+    let mut h_amino_acids: Vec<u8> = Vec::with_capacity(n_h * h_size);
+    let mut l_seq_ids: Vec<u32> = Vec::with_capacity(n_l);
+    let mut l_amino_acids: Vec<u8> = Vec::with_capacity(n_l * l_size);
+
+    for r in &result.results {
+        match r.chain {
+            ChainType::Heavy => {
+                h_seq_ids.push(r.sequence_id);
+                let start = h_amino_acids.len();
+                h_amino_acids.resize(start + h_size, b'-');
+                for pos in &r.positions {
+                    if pos.codon_position == 1 {
+                        let idx = pos.aho_position as usize;
+                        if idx > 0 && idx <= h_size {
+                            h_amino_acids[start + idx - 1] = pos.amino_acid;
+                        }
+                    }
+                }
+            }
+            ChainType::Kappa | ChainType::Lambda => {
+                l_seq_ids.push(r.sequence_id);
+                let start = l_amino_acids.len();
+                l_amino_acids.resize(start + l_size, b'-');
+                for pos in &r.positions {
+                    if pos.codon_position == 1 {
+                        let idx = pos.aho_position as usize;
+                        if idx > 0 && idx <= l_size {
+                            l_amino_acids[start + idx - 1] = pos.amino_acid;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let wide = PyDict::new(py);
+    wide.set_item("H_sequence_id", h_seq_ids)?;
+    wide.set_item(
+        "H_amino_acids",
+        pyo3::types::PyBytes::new(py, &h_amino_acids),
+    )?;
+    wide.set_item("L_sequence_id", l_seq_ids)?;
+    wide.set_item(
+        "L_amino_acids",
+        pyo3::types::PyBytes::new(py, &l_amino_acids),
+    )?;
+
+    let errs = PyDict::new(py);
+    let err_seq_ids: Vec<u32> = result.errors.iter().map(|e| e.sequence_id).collect();
+    let err_chains: Vec<String> = result
+        .errors
+        .iter()
+        .map(|e| e.chain.as_str().to_string())
+        .collect();
+    let err_msgs: Vec<String> = result.errors.iter().map(|e| e.message.clone()).collect();
+    errs.set_item("sequence_id", err_seq_ids)?;
+    errs.set_item("chain", err_chains)?;
+    errs.set_item("error", err_msgs)?;
+
+    Ok((wide.into(), errs.into()))
+}
+
 /// Run Aho numbering on a batch of sequences.
 ///
 /// All four lists must have the same length.
@@ -233,7 +311,7 @@ pub fn _run_batch(
 /// On the Python side reshape with ``numpy.frombuffer(...).reshape(n, 447)``
 /// and pass to ``polars.from_numpy`` for memory-efficient wide DataFrames.
 #[pyfunction]
-#[pyo3(signature = (sequence_ids, nt_seqs, aa_seqs, chains, num_threads=None, progress_callback=None))]
+#[pyo3(signature = (sequence_ids, nt_seqs, aa_seqs, chains, num_threads=None, progress_callback=None, level="NT"))]
 pub fn _run_batch_wide(
     py: Python,
     sequence_ids: Vec<u32>,
@@ -242,6 +320,7 @@ pub fn _run_batch_wide(
     chains: Vec<Option<String>>,
     num_threads: Option<usize>,
     progress_callback: Option<PyObject>,
+    level: &str,
 ) -> PyResult<(PyObject, PyObject)> {
     let n = sequence_ids.len();
     if nt_seqs.len() != n || aa_seqs.len() != n || chains.len() != n {
@@ -284,7 +363,11 @@ pub fn _run_batch_wide(
         }),
     };
 
-    result_to_py_wide(py, batch_result)
+    if level == "AA" {
+        result_to_py_wide_aa(py, batch_result)
+    } else {
+        result_to_py_wide(py, batch_result)
+    }
 }
 
 /// Run Aho numbering on sequences from a FASTA file.
