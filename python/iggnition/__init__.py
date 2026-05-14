@@ -323,6 +323,33 @@ def _col_list(df: pl.DataFrame, col: Optional[str]) -> list:
     return [None] * len(df)
 
 
+def _check_aa_seq_single(aa_seq: Optional[str]) -> Optional[str]:
+    """Raise ValueError if aa_seq contains a stop codon '*'."""
+    if aa_seq is None:
+        return None
+    star = aa_seq.find("*")
+    if star != -1:
+        raise ValueError(
+            f"stop codon '*' found at position {star} in aa_seq; "
+            "remove or truncate at the stop codon before calling run()."
+        )
+    return aa_seq
+
+
+def _sanitize_aa_list(aas: list) -> list:
+    """Truncate aa_seq values at '*'; emit a single warning if any are found."""
+    count = sum(1 for s in aas if s and "*" in s)
+    if count:
+        warnings.warn(
+            f"{count} aa_seq value(s) contain stop codon '*'; "
+            "truncating each sequence at the first stop codon.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return [s[: s.index("*")] if s and "*" in s else s for s in aas]
+    return aas
+
+
 def _run_generic(
     df: pl.DataFrame,
     nt_col: str,
@@ -335,7 +362,7 @@ def _run_generic(
     n = len(df)
     seq_ids = list(range(n))
     nts = _col_list(df, nt_col)
-    aas = _col_list(df, aa_col)
+    aas = _sanitize_aa_list(_col_list(df, aa_col))
     if chain_override:
         chains: list = [chain_override] * n
     else:
@@ -354,9 +381,9 @@ def _run_paired(
 ) -> tuple[dict, dict]:
     n = len(df)
     heavy_nts = _col_list(df, nt_col_heavy)
-    heavy_aas = _col_list(df, aa_col_heavy)
+    heavy_aas = _sanitize_aa_list(_col_list(df, aa_col_heavy))
     light_nts = _col_list(df, nt_col_light)
-    light_aas = _col_list(df, aa_col_light)
+    light_aas = _sanitize_aa_list(_col_list(df, aa_col_light))
 
     # Build inputs: heavy entries (chain="H") + light entries (chain=None, auto K/L)
     seq_ids, nts, aas, chains = [], [], [], []
@@ -392,7 +419,7 @@ def _run_generic_wide(
     n = len(df)
     seq_ids = list(range(n))
     nts = _col_list(df, nt_col)
-    aas = _col_list(df, aa_col)
+    aas = _sanitize_aa_list(_col_list(df, aa_col))
     chains: list = [chain_override] * n if chain_override else _col_list(df, locus_col)
     return _rust_run_batch_wide(seq_ids, nts, aas, chains, num_threads, progress_callback, level)
 
@@ -409,9 +436,9 @@ def _run_paired_wide(
 ) -> tuple[dict, dict]:
     n = len(df)
     heavy_nts = _col_list(df, nt_col_heavy)
-    heavy_aas = _col_list(df, aa_col_heavy)
+    heavy_aas = _sanitize_aa_list(_col_list(df, aa_col_heavy))
     light_nts = _col_list(df, nt_col_light)
-    light_aas = _col_list(df, aa_col_light)
+    light_aas = _sanitize_aa_list(_col_list(df, aa_col_light))
 
     seq_ids, nts, aas, chains = [], [], [], []
     for i in range(n):
@@ -552,6 +579,7 @@ def run(
                 UserWarning,
                 stacklevel=2,
             )
+        aa_seq = _check_aa_seq_single(aa_seq)
         res_dict, _ = _rust_run_batch([0], [nt_seq], [aa_seq], [chain], num_threads)
         results_df = _build_results_df(res_dict)
         results_df = _apply_format(results_df, per_codon, wide, per_chain)
