@@ -1,0 +1,45 @@
+[package]
+name = "iggnition"
+version = "2.0.0"
+edition = "2021"
+authors = ["Benjamin Nemoz <github.com/bnemoz>"]
+description = "Ultra-fast antibody variable domain Aho numbering in Rust"
+license = "MIT"
+repository = "https://github.com/bnemoz/ignition"
+rust-version = "1.75"
+
+[lib]
+name = "iggnition"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "iggnition"
+path = "src/cli.rs"
+
+[features]
+default = []
+python = ["pyo3"]
+io_parquet = ["polars"]
+
+[dependencies]
+pyo3     = { version = "0.25", features = ["extension-module"], optional = true }
+rayon    = "1.10"
+rayon-core = ">=1.12, <1.13"  # pin: 1.13 bumped MSRV to 1.80
+clap     = { version = "4", features = ["derive"] }
+thiserror = "2"
+serde    = { version = "1", features = ["derive"] }
+csv      = "1"
+indicatif = "0.17"
+polars   = { version = "0.46", features = ["lazy", "parquet", "dtype-full"], default-features = false, optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "numbering"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

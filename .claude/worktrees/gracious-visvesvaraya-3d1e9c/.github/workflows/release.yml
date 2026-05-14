@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write   # needed for PyPI trusted publishing
+
+jobs:
+  # ── Build wheels ─────────────────────────────────────────────────────────────
+  build-wheels:
+    name: Build wheel (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 (manylinux)
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+
+          # Linux aarch64 (manylinux, cross-compiled)
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: auto
+
+          # macOS Apple Silicon
+          - os: macos-latest
+            target: aarch64
+            manylinux: ""
+
+          # macOS Intel
+          - os: macos-latest
+            target: x86_64
+            manylinux: ""
+
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64
+            manylinux: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (non-Linux)
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels (Linux)
+        # maturin runs inside a manylinux Docker container — Python is already
+        # present there; pass -i so maturin finds it even on cross-compiled arches.
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: >-
+            --release --out dist
+            --features "pyo3/extension-module,python,io_parquet"
+            -i python3.9 python3.10 python3.11 python3.12
+          sccache: true
+
+      - name: Build wheels (non-Linux)
+        if: runner.os != 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --features "pyo3/extension-module,python,io_parquet"
+          sccache: true
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/
+
+  # ── Build sdist ──────────────────────────────────────────────────────────────
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+  # ── Publish to PyPI ──────────────────────────────────────────────────────────
+  # Only runs for major releases: tags of the form vX.0 (e.g. v1.0, v2.0).
+  # Minor tags (v1.1, v1.2, …) still build wheels and create a GitHub Release
+  # but are NOT pushed to PyPI.
+  publish:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist]
+    if: endsWith(github.ref_name, '.0')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/iggnition/
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses OIDC trusted publishing — no API token needed.
+        # Configure trusted publisher at:
+        # https://pypi.org/manage/project/iggnition/settings/publishing/
+
+  # ── Create GitHub Release ────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

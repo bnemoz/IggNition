@@ -1,0 +1,50 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "iggnition"
+version = "2.0.0"
+description = "Ultra-fast antibody variable domain Aho numbering (>50k seq/s)"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Benjamin Nemoz", email = "github.com/bnemoz" }]
+readme = "README.md"
+keywords = [
+    "antibody", "immunoglobulin", "numbering", "Aho", "ANARCI",
+    "bioinformatics", "repertoire", "CDR", "variable domain",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "polars>=0.20",
+]
+
+[project.urls]
+Homepage = "https://github.com/bnemoz/ignition"
+Repository = "https://github.com/bnemoz/ignition"
+"Bug Tracker" = "https://github.com/bnemoz/ignition/issues"
+
+[project.optional-dependencies]
+dev = ["maturin", "pytest", "pandas", "pyarrow"]
+
+[tool.maturin]
+features = ["pyo3/extension-module", "python"]
+module-name = "iggnition._ignition"
+python-source = "python"
+bindings = "pyo3"
+
+[project.scripts]
+iggnition = "iggnition._cli:main"
