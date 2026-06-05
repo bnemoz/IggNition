@@ -10,13 +10,19 @@ const BIGRAM_K: usize = 40;
 /// Stage 2 (ungapped BLOSUM62): pass this many candidates to full NW with traceback.
 const UNGAPPED_K: usize = 4;
 
-/// CDR3 Aho position range (inclusive) by chain
+/// CDR3 Aho position range (inclusive) by chain.
+///
+/// Canonical Aho boundaries (matching regions.py CDR_REGIONS / NUMBERING_CROSSREF):
+///   Heavy : CDR3 109..=137, FR4 138..=149 (Aho 138 = FR4-start / J-gene Trp)
+///   K / L : CDR3 109..=138, FR4 139..=148 (Aho 139 = FR4-start)
+/// NOTE: the heavy and light values were previously swapped here, which (together
+/// with the J-transfer offset below) caused FR4 to be mis-numbered / dropped.
 const CDR3_START: u16 = 109;
-const CDR3_END_H: u16 = 138;
-const CDR3_END_KL: u16 = 137;
+const CDR3_END_H: u16 = 137;
+const CDR3_END_KL: u16 = 138;
 /// FR4 start
-const FR4_START_H: u16 = 139;
-const FR4_START_KL: u16 = 138;
+const FR4_START_H: u16 = 138;
+const FR4_START_KL: u16 = 139;
 
 fn cdr3_end(chain: ChainType) -> u16 {
     match chain {
@@ -82,7 +88,9 @@ pub fn identify_v_germline_ws(
         .iter()
         .map(|&(_, g)| {
             let target = germline_aa_seq(g);
-            let aln = align_with_workspace(aa, &target, 11, 1, ws);
+            // V germline: free the query 3' overhang so the CDR3+FR4 tail does
+            // not get spuriously absorbed into the V alignment.
+            let aln = align_with_workspace(aa, &target, 11, 1, false, true, ws);
             let score = aln.score;
             GermlineHit {
                 germline: g,
@@ -108,7 +116,10 @@ pub fn identify_j_germline_ws(
     j_germlines(chain)
         .map(|g| {
             let target = germline_aa_seq(g);
-            let aln = align_with_workspace(aa, &target, 11, 1, ws);
+            // J germline: free the query 5' overhang so the CDR3 prefix does not
+            // get spuriously absorbed into the J alignment (the J framework/FR4
+            // sits at the 3' end of the query tail).
+            let aln = align_with_workspace(aa, &target, 11, 1, true, false, ws);
             let score = aln.score;
             GermlineHit {
                 germline: g,
@@ -172,11 +183,17 @@ fn transfer_j_positions(
     aln: &Alignment,
     germline: &GermlineEntry,
     query_start_idx: usize,
+    fr4_start_pos: u16,
 ) -> Vec<(u16, usize)> {
     let germ_aho: Vec<u16> = germline.residues.iter().map(|&(pos, _, _)| pos).collect();
 
     let mut j_positions: Vec<(u16, usize)> = Vec::new();
     let mut g_idx = 0usize;
+    // `query_start_idx` MUST be the absolute query index of the FIRST query
+    // residue covered by this (global) alignment — i.e. the start of post_v_aa,
+    // which is `v_last_q_idx`. We then walk the whole alignment and let q_idx
+    // advance naturally. (Passing the FR4 offset here would double-count the
+    // CDR3 stretch and shift every FR4 residue to the wrong query position.)
     let mut q_idx = query_start_idx;
 
     for (&qa, &ta) in aln.query_aligned.iter().zip(aln.target_aligned.iter()) {
@@ -191,7 +208,9 @@ fn transfer_j_positions(
             _ => {
                 if g_idx < germ_aho.len() {
                     let aho = germ_aho[g_idx];
-                    if aho >= fr4_start(ChainType::Heavy) || aho >= fr4_start(ChainType::Kappa) {
+                    // Keep only the FR4 portion of the J alignment, using the
+                    // chain-specific FR4 start (heavy 138, K/L 139).
+                    if aho >= fr4_start_pos {
                         j_positions.push((aho, q_idx));
                     }
                 }
@@ -318,8 +337,12 @@ pub fn number_sequence_ws(
     // FR4 Aho positions from J alignment
     let mut fr4_positions: Vec<(u16, usize)> = Vec::new();
     if let Some(ref jh) = j_hit {
-        let abs_q_start = v_last_q_idx + j_start_in_post;
-        let fr4_transferred = transfer_j_positions(&jh.alignment, jh.germline, abs_q_start);
+        // The J alignment is global over post_v_aa, whose first residue sits at
+        // absolute query index v_last_q_idx. transfer_j_positions walks the whole
+        // alignment and filters to FR4 (aho >= fr4_start_pos) itself, so we pass
+        // v_last_q_idx as the base — NOT v_last_q_idx + j_start_in_post.
+        let fr4_transferred =
+            transfer_j_positions(&jh.alignment, jh.germline, v_last_q_idx, fr4_start_pos);
         fr4_positions = fr4_transferred;
     } else {
         // Fallback: assign FR4 positions sequentially
@@ -390,6 +413,33 @@ pub fn number_sequence_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard: the Rust CDR3/FR4 boundary constants MUST stay in sync
+    /// with the canonical region map in `python/iggnition/regions.py`
+    /// (`CDR_REGIONS` / `NUMBERING_CROSSREF`). Those define, per chain:
+    ///     Heavy : CDR3 109..=137, FR4 138..=149  (Aho 138 = FR4 start / J-gene Trp)
+    ///     K / L : CDR3 109..=138, FR4 139..=148  (Aho 139 = FR4 start)
+    /// These two sources were previously swapped on the Rust side, which mangled
+    /// every FR4 (the J framework was dropped/mis-numbered). If you change one
+    /// side, change the other — this test fails loudly if they diverge again.
+    #[test]
+    fn test_cdr3_fr4_boundaries_match_canonical_region_map() {
+        assert_eq!(CDR3_START, 109, "CDR3 starts at Aho 109 for all chains");
+        assert_eq!(CDR3_END_H, 137, "heavy CDR3 ends at Aho 137 (regions.py)");
+        assert_eq!(FR4_START_H, 138, "heavy FR4 starts at Aho 138 (regions.py)");
+        assert_eq!(CDR3_END_KL, 138, "K/L CDR3 ends at Aho 138 (regions.py)");
+        assert_eq!(FR4_START_KL, 139, "K/L FR4 starts at Aho 139 (regions.py)");
+        // FR4 must begin exactly one position past CDR3 end, per chain.
+        assert_eq!(FR4_START_H, CDR3_END_H + 1);
+        assert_eq!(FR4_START_KL, CDR3_END_KL + 1);
+        // Sanity vs the public chain API.
+        assert_eq!(cdr3_end(ChainType::Heavy), 137);
+        assert_eq!(fr4_start(ChainType::Heavy), 138);
+        assert_eq!(cdr3_end(ChainType::Kappa), 138);
+        assert_eq!(fr4_start(ChainType::Kappa), 139);
+        assert_eq!(cdr3_end(ChainType::Lambda), 138);
+        assert_eq!(fr4_start(ChainType::Lambda), 139);
+    }
 
     #[test]
     fn test_identify_v_germline_heavy() {

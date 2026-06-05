@@ -49,11 +49,23 @@ impl Default for AlignWorkspace {
 }
 
 /// Align `query` against `target` using pre-allocated workspace (no heap alloc in hot path).
+/// Affine-gap alignment of `query` against `target`.
+///
+/// `free_query_start` / `free_query_end` switch on SEMI-GLOBAL behaviour: when
+/// set, an unaligned query overhang at that end costs nothing (the target is
+/// still fully consumed). This is what lets us fit a germline (target) inside a
+/// longer query (the antibody) without the germline spuriously stretching into
+/// the junction:
+///   * V germline  -> `free_query_end   = true`  (CDR3+FR4 tail dangles free)
+///   * J germline  -> `free_query_start = true`  (CDR3 prefix dangles free)
+/// With both `false` this is ordinary global Needleman-Wunsch.
 pub fn align_with_workspace(
     query: &[u8],
     target: &[u8],
     gap_open: i32,
     gap_ext: i32,
+    free_query_start: bool,
+    free_query_end: bool,
     ws: &mut AlignWorkspace,
 ) -> Alignment {
     let m = query.len();
@@ -79,7 +91,13 @@ pub fn align_with_workspace(
     ws.x_mat[idx(0, 0)] = NEG_INF;
     ws.y_mat[idx(0, 0)] = NEG_INF;
     for i in 1..=m {
-        ws.x_mat[idx(i, 0)] = -gap_open - (i as i32 - 1) * gap_ext;
+        // X = query advances while target gaps. A free query 5' overhang means
+        // leading query residues (before the target starts) cost nothing.
+        ws.x_mat[idx(i, 0)] = if free_query_start {
+            0
+        } else {
+            -gap_open - (i as i32 - 1) * gap_ext
+        };
         ws.y_mat[idx(i, 0)] = NEG_INF;
         ws.m_mat[idx(i, 0)] = NEG_INF;
     }
@@ -131,17 +149,40 @@ pub fn align_with_workspace(
         }
     }
 
-    // --- Best ending state at (m, n) ---
-    let (best_score, mut state) = max3(
-        ws.m_mat[idx(m, n)],
-        ws.x_mat[idx(m, n)],
-        ws.y_mat[idx(m, n)],
-    );
-
-    // --- Traceback ---
+    // --- Choose the ending cell ---
+    // Global alignment ends at (m, n). With a free query 3' overhang we instead
+    // let the alignment stop at the best-scoring (i, n): the target is still
+    // fully consumed (column n), but trailing query rows i+1..m are free gaps.
     let mut qa = Vec::with_capacity(m + n);
     let mut ta = Vec::with_capacity(m + n);
-    let mut i = m;
+
+    let (best_score, mut state, start_i) = if free_query_end {
+        let mut bi = m;
+        let mut bs = NEG_INF;
+        let mut bst = 0u8;
+        for ii in 0..=m {
+            let (s, st) = max3(ws.m_mat[idx(ii, n)], ws.x_mat[idx(ii, n)], ws.y_mat[idx(ii, n)]);
+            if s >= bs {
+                bs = s;
+                bst = st;
+                bi = ii;
+            }
+        }
+        (bs, bst, bi)
+    } else {
+        let (s, st) = max3(ws.m_mat[idx(m, n)], ws.x_mat[idx(m, n)], ws.y_mat[idx(m, n)]);
+        (s, st, m)
+    };
+
+    // Trailing free query residues (3' overhang). We push them first; after the
+    // final reverse they land at the 3' end of the alignment in 5'->3' order.
+    for qi in (start_i..m).rev() {
+        qa.push(query[qi]);
+        ta.push(b'-');
+    }
+
+    // --- Traceback ---
+    let mut i = start_i;
     let mut j = n;
 
     while i > 0 || j > 0 {
@@ -201,7 +242,8 @@ pub fn align_with_workspace(
 /// Convenience wrapper (allocates its own workspace — fine for single-sequence use).
 pub fn align(query: &[u8], target: &[u8], gap_open: i32, gap_ext: i32) -> Alignment {
     let mut ws = AlignWorkspace::new();
-    align_with_workspace(query, target, gap_open, gap_ext, &mut ws)
+    // Pure global alignment (no free end gaps) — preserves the original behaviour.
+    align_with_workspace(query, target, gap_open, gap_ext, false, false, &mut ws)
 }
 
 /// Fast O(n+m) pre-filter score based on 2-gram (bigram) AA overlap.
@@ -370,7 +412,7 @@ mod tests {
         let t = b"QVQLVQSGAEVKKPGASVKVSCK";
         let aln1 = align(q, t, 11, 1);
         let mut ws = AlignWorkspace::new();
-        let aln2 = align_with_workspace(q, t, 11, 1, &mut ws);
+        let aln2 = align_with_workspace(q, t, 11, 1, false, false, &mut ws);
         assert_eq!(aln1.score, aln2.score);
         assert_eq!(aln1.query_aligned, aln2.query_aligned);
     }
