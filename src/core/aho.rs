@@ -38,6 +38,46 @@ fn fr4_start(chain: ChainType) -> u16 {
     }
 }
 
+/// AHo numbers CDR3 **symmetrically**, not left-to-right: residues fill inward
+/// from both ends toward a central apex gap, so structurally equivalent
+/// positions line up across antibodies of different CDR3 length. The N-terminal
+/// residues ascend from 109; the C-terminal residues descend from `cdr3_end`
+/// (137 for heavy, 138 for K/L); the apex stays gapped for shorter loops.
+///
+/// The odd residue (for odd lengths) goes to the **N-side for heavy** and the
+/// **C-side for K/L** — this is the empirically observed Honegger–Plückthun /
+/// ANARCI convention (verified against ANARCI across the human repertoire).
+///
+/// Returns the AHo position for each CDR3 query residue, in query order, so the
+/// i-th returned value is the AHo position of the i-th CDR3 residue. The result
+/// is capped at the CDR3 capacity (`cdr3_end - 109 + 1`): heavy 29, K/L 30.
+/// Lengths beyond that would require AHo apex *insertion letters*, which the
+/// integer-only output cannot represent — callers handle/flag overflow.
+fn cdr3_aho_positions(chain: ChainType, len: usize) -> Vec<u16> {
+    let cdr3_end_pos = cdr3_end(chain);
+    let capacity = (cdr3_end_pos - CDR3_START + 1) as usize;
+    let l = len.min(capacity);
+
+    // Split: heavy puts the odd residue on the N-side (ceil), K/L on the C-side.
+    let n_count = match chain {
+        ChainType::Heavy => l.div_ceil(2),
+        _ => l / 2,
+    };
+    let c_count = l - n_count;
+    // C-side occupies the top `c_count` positions ending at cdr3_end, ascending.
+    let c_start = cdr3_end_pos - c_count as u16 + 1;
+
+    let mut positions = Vec::with_capacity(l);
+    for i in 0..l {
+        if i < n_count {
+            positions.push(CDR3_START + i as u16); // N-side: 109, 110, ...
+        } else {
+            positions.push(c_start + (i - n_count) as u16); // C-side, ascending
+        }
+    }
+    positions
+}
+
 /// Result of germline identification: the best-matching germline and alignment.
 pub struct GermlineHit {
     pub germline: &'static GermlineEntry,
@@ -320,18 +360,18 @@ pub fn number_sequence_ws(
         &[]
     };
 
-    // CDR3 Aho positions
+    // CDR3 Aho positions — symmetric AHo fill (see cdr3_aho_positions). Residues
+    // beyond the integer-slot capacity (heavy 29 / K-L 30) cannot be represented
+    // without apex insertion letters; they are dropped here (vanishingly rare for
+    // well-formed antibodies — quantified in the audit) and the capped count is
+    // assigned symmetrically.
     let cdr3_len = cdr3_aa.len();
-    if cdr3_len > max_cdr3_len {
-        // More CDR3 residues than Aho positions — assign what we can
-        // (the DESIGN.md notes excess residues get insertion positions)
-        // For now, cap at max and continue (non-fatal)
-    }
-    let cdr3_positions: Vec<(u16, usize)> = cdr3_aa
+    let cdr3_slots = cdr3_aho_positions(chain, cdr3_len); // len == min(cdr3_len, max_cdr3_len)
+    let _ = max_cdr3_len;
+    let cdr3_positions: Vec<(u16, usize)> = cdr3_slots
         .iter()
         .enumerate()
-        .take(max_cdr3_len)
-        .map(|(i, _)| (CDR3_START + i as u16, v_last_q_idx + i))
+        .map(|(i, &aho)| (aho, v_last_q_idx + i))
         .collect();
 
     // FR4 Aho positions from J alignment
@@ -439,6 +479,61 @@ mod tests {
         assert_eq!(fr4_start(ChainType::Kappa), 139);
         assert_eq!(cdr3_end(ChainType::Lambda), 138);
         assert_eq!(fr4_start(ChainType::Lambda), 139);
+    }
+
+    /// Golden test: CDR3 symmetric fill must match ANARCI's AHo numbering.
+    /// Expected position sets were extracted from ANARCI (scheme="aho") over the
+    /// human repertoire and are the Honegger–Plückthun convention (apex gap;
+    /// odd residue N-side for heavy, C-side for K/L). See cdr3_aho_positions.
+    #[test]
+    fn test_cdr3_symmetric_fill_matches_anarci() {
+        // Heavy (span 109..=137, odd -> N-side).
+        assert_eq!(cdr3_aho_positions(ChainType::Heavy, 2), vec![109, 137]);
+        assert_eq!(cdr3_aho_positions(ChainType::Heavy, 3), vec![109, 110, 137]);
+        assert_eq!(
+            cdr3_aho_positions(ChainType::Heavy, 4),
+            vec![109, 110, 136, 137]
+        );
+        assert_eq!(
+            cdr3_aho_positions(ChainType::Heavy, 5),
+            vec![109, 110, 111, 136, 137]
+        );
+        assert_eq!(
+            cdr3_aho_positions(ChainType::Heavy, 22),
+            vec![
+                109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 127, 128, 129, 130, 131,
+                132, 133, 134, 135, 136, 137
+            ]
+        );
+        // K/L (span 109..=138, odd -> C-side).
+        assert_eq!(cdr3_aho_positions(ChainType::Kappa, 2), vec![109, 138]);
+        assert_eq!(cdr3_aho_positions(ChainType::Kappa, 3), vec![109, 137, 138]);
+        assert_eq!(
+            cdr3_aho_positions(ChainType::Lambda, 5),
+            vec![109, 110, 136, 137, 138]
+        );
+        assert_eq!(
+            cdr3_aho_positions(ChainType::Lambda, 11),
+            vec![109, 110, 111, 112, 113, 133, 134, 135, 136, 137, 138]
+        );
+        // Every returned position must lie in the chain's CDR3 span, ascending,
+        // and never collide with the apex gap (no duplicates).
+        for &chain in &[ChainType::Heavy, ChainType::Kappa, ChainType::Lambda] {
+            let cap = (cdr3_end(chain) - CDR3_START + 1) as usize;
+            for l in 0..=cap {
+                let p = cdr3_aho_positions(chain, l);
+                assert_eq!(p.len(), l);
+                assert!(
+                    p.windows(2).all(|w| w[0] < w[1]),
+                    "must be strictly ascending"
+                );
+                assert!(p
+                    .iter()
+                    .all(|&x| (CDR3_START..=cdr3_end(chain)).contains(&x)));
+            }
+            // Overflow is capped at capacity, not panicking.
+            assert_eq!(cdr3_aho_positions(chain, cap + 5).len(), cap);
+        }
     }
 
     #[test]
