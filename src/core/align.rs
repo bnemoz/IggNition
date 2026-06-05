@@ -48,8 +48,8 @@ impl Default for AlignWorkspace {
     }
 }
 
-/// Align `query` against `target` using pre-allocated workspace (no heap alloc in hot path).
-/// Affine-gap alignment of `query` against `target`.
+/// Affine-gap alignment of `query` against `target` using a pre-allocated
+/// workspace (no heap allocation in the hot path).
 ///
 /// `free_query_start` / `free_query_end` switch on SEMI-GLOBAL behaviour: when
 /// set, an unaligned query overhang at that end costs nothing (the target is
@@ -58,6 +58,7 @@ impl Default for AlignWorkspace {
 /// the junction:
 ///   * V germline  -> `free_query_end   = true`  (CDR3+FR4 tail dangles free)
 ///   * J germline  -> `free_query_start = true`  (CDR3 prefix dangles free)
+///
 /// With both `false` this is ordinary global Needleman-Wunsch.
 pub fn align_with_workspace(
     query: &[u8],
@@ -161,7 +162,11 @@ pub fn align_with_workspace(
         let mut bs = NEG_INF;
         let mut bst = 0u8;
         for ii in 0..=m {
-            let (s, st) = max3(ws.m_mat[idx(ii, n)], ws.x_mat[idx(ii, n)], ws.y_mat[idx(ii, n)]);
+            let (s, st) = max3(
+                ws.m_mat[idx(ii, n)],
+                ws.x_mat[idx(ii, n)],
+                ws.y_mat[idx(ii, n)],
+            );
             if s >= bs {
                 bs = s;
                 bst = st;
@@ -170,7 +175,11 @@ pub fn align_with_workspace(
         }
         (bs, bst, bi)
     } else {
-        let (s, st) = max3(ws.m_mat[idx(m, n)], ws.x_mat[idx(m, n)], ws.y_mat[idx(m, n)]);
+        let (s, st) = max3(
+            ws.m_mat[idx(m, n)],
+            ws.x_mat[idx(m, n)],
+            ws.y_mat[idx(m, n)],
+        );
         (s, st, m)
     };
 
