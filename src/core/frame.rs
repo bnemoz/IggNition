@@ -66,7 +66,7 @@ pub fn resolve_without_aa(
             .flat_map(|&chain| v_germlines(chain))
             .map(|g| {
                 let target = germline_aa_seq(g);
-                let aln = align_with_workspace(aa_frame, &target, 11, 1, &mut ws);
+                let aln = align_with_workspace(aa_frame, &target, 11, 1, false, false, &mut ws);
                 aln.score
             })
             .max()
