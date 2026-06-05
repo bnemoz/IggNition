@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "iggnition"
-version = "2.0.0"
+version = "3.0.0"
 description = "Ultra-fast antibody variable domain Aho numbering (>50k seq/s)"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Benjamin Nemoz", email = "github.com/bnemoz" }]
+authors = [{ name = "Benjamin Nemoz", email = "bnemoz@scripps.edu" }]
 readme = "README.md"
 keywords = [
     "antibody", "immunoglobulin", "numbering", "Aho", "ANARCI",
